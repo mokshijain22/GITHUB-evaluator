@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # GitHub Repo Evaluator
 
 AI-powered GitHub repository quality scorer built with React + Vite + Express.
@@ -39,3 +40,6 @@ github-evaluator/
 │   ├── main.jsx       # Entry point
 │   └── index.css      # Global styles
 ```
+=======
+# GITHUB-evaluator
+>>>>>>> fb769d299b39bee5fe2a2b98ae841cce07c65424
