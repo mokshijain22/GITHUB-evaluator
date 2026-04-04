@@ -10,6 +10,10 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
 const app = express()
+
+// Trust Render's proxy so secure cookies work over HTTPS
+app.set('trust proxy', 1)
+
 app.use(cors({ origin: true, credentials: true }))
 app.use(express.json())
 app.use(cookieParser())
@@ -20,15 +24,16 @@ app.use(session({
   cookie: {
     secure: process.env.NODE_ENV === 'production',
     httpOnly: true,
+    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
     maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
   }
 }))
 
-const GROQ_API_KEY    = process.env.GROQ_API_KEY
-const GH_CLIENT_ID   = process.env.GITHUB_CLIENT_ID
-const GH_CLIENT_SEC  = process.env.GITHUB_CLIENT_SECRET
-const GH_TOKEN        = process.env.GITHUB_TOKEN   // optional PAT for public-repo rate limits
-const PORT            = process.env.PORT || 3001
+const GROQ_API_KEY  = process.env.GROQ_API_KEY
+const GH_CLIENT_ID  = process.env.GITHUB_CLIENT_ID
+const GH_CLIENT_SEC = process.env.GITHUB_CLIENT_SECRET
+const GH_TOKEN      = process.env.GITHUB_TOKEN
+const PORT          = process.env.PORT || 3001
 
 // ── Auth capability check ─────────────────────────────────────────────────────
 app.get('/auth/status', (req, res) => {
@@ -36,27 +41,23 @@ app.get('/auth/status', (req, res) => {
 })
 
 // ── GitHub OAuth ──────────────────────────────────────────────────────────────
-
-// Step 1: Redirect user to GitHub to authorize
 app.get('/auth/github', (req, res) => {
   if (!GH_CLIENT_ID) {
     return res.redirect('/?error=oauth_not_configured')
   }
   const params = new URLSearchParams({
     client_id: GH_CLIENT_ID,
-    scope: 'repo read:user',   // repo = access private repos
+    scope: 'repo read:user',
     state: Math.random().toString(36).slice(2)
   })
   res.redirect(`https://github.com/login/oauth/authorize?${params}`)
 })
 
-// Step 2: GitHub redirects back here with ?code=...
 app.get('/auth/github/callback', async (req, res) => {
   const { code } = req.query
   if (!code) return res.redirect('/?error=oauth_denied')
 
   try {
-    // Exchange code for access token
     const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
@@ -67,7 +68,6 @@ app.get('/auth/github/callback', async (req, res) => {
 
     const accessToken = tokenData.access_token
 
-    // Fetch basic user info to store in session
     const userRes = await fetch('https://api.github.com/user', {
       headers: { Authorization: `Bearer ${accessToken}`, 'User-Agent': 'RepoScan' }
     })
@@ -76,14 +76,17 @@ app.get('/auth/github/callback', async (req, res) => {
     req.session.githubToken = accessToken
     req.session.githubUser  = { login: user.login, name: user.name, avatar: user.avatar_url }
 
-    res.redirect('/')
+    // Force session save before redirecting
+    req.session.save((err) => {
+      if (err) console.error('Session save error:', err)
+      res.redirect('/')
+    })
   } catch (err) {
     console.error('OAuth callback error:', err.message)
     res.redirect(`/?error=${encodeURIComponent(err.message)}`)
   }
 })
 
-// Return current session user (or null)
 app.get('/auth/me', (req, res) => {
   if (req.session.githubUser) {
     res.json({ user: req.session.githubUser, connected: true })
@@ -92,29 +95,23 @@ app.get('/auth/me', (req, res) => {
   }
 })
 
-// Logout — destroy session
 app.post('/auth/logout', (req, res) => {
   req.session.destroy(() => res.json({ ok: true }))
 })
 
-// ── GitHub proxy — forward requests using stored token ────────────────────────
-// Frontend calls /api/github/* and we forward to api.github.com/*
-// This keeps the token server-side only, never exposed to the browser.
+// ── GitHub proxy ──────────────────────────────────────────────────────────────
 app.get('/api/github/*', async (req, res) => {
-  const ghPath = req.params[0]                        // everything after /api/github/
+  const ghPath = req.params[0]
   const query  = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : ''
   const url    = `https://api.github.com/${ghPath}${query}`
 
   const headers = { 'User-Agent': 'RepoScan', Accept: 'application/vnd.github+json' }
-  // Use session OAuth token first, then fall back to server-side PAT for public repos
   const token = req.session.githubToken || GH_TOKEN
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`
-  }
+  if (token) headers['Authorization'] = `Bearer ${token}`
 
   try {
-    const ghRes  = await fetch(url, { headers })
-    const body   = await ghRes.json()
+    const ghRes = await fetch(url, { headers })
+    const body  = await ghRes.json()
     res.status(ghRes.status).json(body)
   } catch (err) {
     res.status(500).json({ error: err.message })
@@ -124,7 +121,7 @@ app.get('/api/github/*', async (req, res) => {
 // ── Groq: analyze ─────────────────────────────────────────────────────────────
 app.post('/api/analyze', async (req, res) => {
   if (!GROQ_API_KEY) {
-    return res.status(500).json({ error: 'Server not configured. Set GROQ_API_KEY env variable.' })
+    return res.status(500).json({ error: 'GROQ_API_KEY not set in .env' })
   }
   try {
     const { prompt } = req.body
@@ -149,7 +146,7 @@ app.post('/api/analyze', async (req, res) => {
 // ── Groq: chat ────────────────────────────────────────────────────────────────
 app.post('/api/chat', async (req, res) => {
   if (!GROQ_API_KEY) {
-    return res.status(500).json({ error: 'Server not configured.' })
+    return res.status(500).json({ error: 'GROQ_API_KEY not set in .env' })
   }
   try {
     const { messages } = req.body
