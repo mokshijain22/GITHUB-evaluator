@@ -1,27 +1,27 @@
-# Stage 1: Build frontend
-FROM node:18 AS builder
+# ── Stage 1: Build React frontend ────────────────────────────────────────────
+FROM node:20-alpine AS builder
 
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm install
+RUN npm ci
 
 COPY . .
-
 RUN npm run build
 
-# Stage 2: Run backend
-FROM node:18
+# ── Stage 2: Production server ────────────────────────────────────────────────
+FROM node:20-alpine AS runner
 
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm install --only=production
+RUN npm ci --omit=dev
 
 COPY --from=builder /app/dist ./dist
 COPY server.js ./
 
-
-EXPOSE 3000
+ENV PORT=3001
+ENV NODE_ENV=production
+EXPOSE 3001
 
 CMD ["node", "server.js"]
