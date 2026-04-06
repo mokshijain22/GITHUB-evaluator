@@ -1,6 +1,6 @@
 {
   "name": "github-evaluator",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "type": "module",
   "scripts": {
     "dev": "concurrently \"vite\" \"node --env-file=.env server.js\"",
@@ -15,7 +15,8 @@
     "cors": "^2.8.5",
     "node-fetch": "^3.3.2",
     "express-session": "^1.18.0",
-    "cookie-parser": "^1.4.6"
+    "cookie-parser": "^1.4.6",
+    "razorpay": "^2.9.2"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.0.0",
