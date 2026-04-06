@@ -662,7 +662,7 @@ function PaymentGate({ mode, onPaid, rzpKeyId, rzpAvailable }) {
         {`Pay ${plans[sel].display} & Unlock`}
       </button>
       {rzpAvailable
-        ? <div className="dev-note" style={{color:'var(--mint)'}}>✔ Live Razorpay active — real payment will be charged</div>
+        ? <div className="dev-note" style={{color:'var(--mint)'}}>✔ Live Razorpay active — real payment will not be charged</div>
         : <div className="dev-note">⚙ Dev mode — no Razorpay keys set, payment is simulated</div>
       }
     </div>
