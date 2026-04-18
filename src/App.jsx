@@ -1584,7 +1584,10 @@ export default function App() {
           ))}
         </div>
 
-        
+        {mode==='repo'     && <RepoPanel ghUser={ghUser} oauthAvailable={oauthAvailable} {...sharedProps}/>}
+        {mode==='profile'  && <ProfilePanel {...sharedProps}/>}
+        {mode==='linkedin' && <LinkedInPanel {...sharedProps}/>}
+        {mode==='resume'   && <ResumePanel {...sharedProps}/>}
       </div>
     </>
   );
