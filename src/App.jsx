@@ -1574,21 +1574,5 @@ export default function App() {
           </div>
         )}
 
-        <div className="tabs" style={{marginBottom:36}}>
-          {MODES.map(m => (
-            <button key={m.id} className={`tab ${mode===m.id?'on':''}`} onClick={()=>setMode(m.id)}>
-              <span className="tab-icon">{m.icon}</span>
-              {m.label}
-              {isUnlocked(m.id) && mode!==m.id && <span style={{width:5,height:5,borderRadius:'50%',background:'var(--mint)',display:'inline-block',marginLeft:4}}/>}
-            </button>
-          ))}
-        </div>
-
-        {mode==='repo'     && <RepoPanel ghUser={ghUser} oauthAvailable={oauthAvailable} {...sharedProps}/>}
-        {mode==='profile'  && <ProfilePanel {...sharedProps}/>}
-        {mode==='linkedin' && <LinkedInPanel {...sharedProps}/>}
-        {mode==='resume'   && <ResumePanel {...sharedProps}/>}
-      </div>
-    </>
   );
 }
