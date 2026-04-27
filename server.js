@@ -5,6 +5,8 @@ import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
 import session from 'express-session'
 import cookieParser from 'cookie-parser'
+import crypto from 'crypto'
+import { buildLinkedinPrompt, buildProfilePrompt, buildResumePrompt } from './prompts.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -16,7 +18,7 @@ app.use(cors({ origin: true, credentials: true }))
 app.use(express.json({ limit: '4mb' }))
 app.use(cookieParser())
 app.use(session({
-  secret: process.env.SESSION_SECRET || 'devprofile-secret-change-in-prod',
+  secret: process.env.SESSION_SECRET || (process.env.NODE_ENV === 'production' ? '' : 'devprofile-secret-change-in-prod'),
   resave: false,
   saveUninitialized: false,
   cookie: {
@@ -26,6 +28,10 @@ app.use(session({
     maxAge: 7 * 24 * 60 * 60 * 1000
   }
 }))
+
+if (process.env.NODE_ENV === 'production' && !process.env.SESSION_SECRET) {
+  throw new Error('SESSION_SECRET must be set in production')
+}
 
 const GROQ_API_KEY   = process.env.GROQ_API_KEY
 const GH_CLIENT_ID   = process.env.GITHUB_CLIENT_ID
@@ -47,17 +53,23 @@ app.get('/auth/status', (req, res) => {
 // ── GitHub OAuth ───────────────────────────────────────────────────────────
 app.get('/auth/github', (req, res) => {
   if (!GH_CLIENT_ID) return res.redirect('/?error=oauth_not_configured')
+  const state = crypto.randomBytes(16).toString('hex')
+  req.session.oauthState = state
   const params = new URLSearchParams({
     client_id: GH_CLIENT_ID,
     scope: 'repo read:user',
-    state: Math.random().toString(36).slice(2)
+    state
   })
   res.redirect(`https://github.com/login/oauth/authorize?${params}`)
 })
 
 app.get('/auth/github/callback', async (req, res) => {
-  const { code } = req.query
+  const { code, state } = req.query
   if (!code) return res.redirect('/?error=oauth_denied')
+  if (!state || state !== req.session.oauthState) {
+    return res.redirect('/?error=invalid_oauth_state')
+  }
+  delete req.session.oauthState
   try {
     const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
       method: 'POST',
@@ -95,6 +107,16 @@ app.post('/auth/logout', (req, res) => {
 // ── GitHub proxy ───────────────────────────────────────────────────────────
 app.get('/api/github/*', async (req, res) => {
   const ghPath = req.params[0]
+  const isAllowedGithubPath = (
+    ghPath === 'user' ||
+    ghPath.startsWith('user/') ||
+    ghPath.startsWith('repos/') ||
+    ghPath.startsWith('users/') ||
+    ghPath.startsWith('search/')
+  )
+  if (!isAllowedGithubPath) {
+    return res.status(403).json({ error: 'Blocked GitHub API path' })
+  }
   const query  = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : ''
   const url    = `https://api.github.com/${ghPath}${query}`
   const headers = { 'User-Agent': 'DevProfileAI', Accept: 'application/vnd.github+json' }
@@ -237,13 +259,15 @@ app.post('/api/payment/verify', async (req, res) => {
     ? ['repo', 'profile', 'linkedin', 'resume', 'combo']
     : [plan, ...(plan === 'combo' ? ['repo','profile','linkedin','resume'] : [])]
 
-  if (dev) {
+  const allowDevBypass = process.env.NODE_ENV !== 'production' && (!RZP_KEY_ID || !RZP_KEY_SECRET)
+  if (dev && allowDevBypass) {
     unlock(plansToUnlock)
     return req.session.save(() => res.json({ verified: true, paidFor: req.session.paidFor }))
+  } else if (dev) {
+    return res.status(403).json({ error: 'Dev payment bypass disabled' })
   }
 
   try {
-    const crypto = await import('crypto')
     const body = razorpay_order_id + '|' + razorpay_payment_id
     const expectedSig = crypto.createHmac('sha256', RZP_KEY_SECRET).update(body).digest('hex')
     if (expectedSig === razorpay_signature) {
@@ -264,6 +288,9 @@ app.get('/api/payment/status', (req, res) => {
 
 // Reset payment status (for testing only)
 app.post('/api/payment/reset', (req, res) => {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(403).json({ error: 'Disabled in production' })
+  }
   req.session.paidFor = {}
   req.session.save(() => res.json({ ok: true }))
 })
@@ -323,71 +350,7 @@ app.post('/api/analyze-profile', async (req, res) => {
     const eventsArr    = Array.isArray(events) ? events : []
     const commitEvents = eventsArr.filter(e => e.type === 'PushEvent').length
     const prEvents     = eventsArr.filter(e => e.type === 'PullRequestEvent').length
-    const hasProfileBio = !!(user.bio && user.bio.length > 20)
-
-    const prompt = `You are a senior engineering hiring manager evaluating a GitHub profile. Be fair and calibrated. A student or junior dev with some projects should score 45-65. A mid-level with good repos should score 65-80.
-
-Return ONLY valid JSON (no markdown, no backticks):
-{
-  "score": number (0-100),
-  "grade": "A+"|"A"|"B+"|"B"|"C+"|"C"|"D",
-  "headline": "2-sentence honest assessment",
-  "strengths": ["strength1","strength2","strength3"],
-  "gaps": ["gap1","gap2","gap3"],
-  "tags": ["tag1","tag2","tag3","tag4"],
-  "radarData": [
-    {"label":"Activity","value":number},
-    {"label":"Impact","value":number},
-    {"label":"Diversity","value":number},
-    {"label":"Visibility","value":number},
-    {"label":"Quality","value":number}
-  ],
-  "categories": [
-    {"name":"Repository Quality","score":number,"detail":"short detail"},
-    {"name":"Community Impact","score":number,"detail":"short detail"},
-    {"name":"Profile Completeness","score":number,"detail":"short detail"},
-    {"name":"Tech Diversity","score":number,"detail":"short detail"}
-  ],
-  "improvements": [
-    {"title":"specific action","why":"reason","priority":"high|medium|low"}
-  ],
-  "hirability": number,
-  "openSourceScore": number,
-  "consistencyScore": number
-}
-
-SCORING:
-- Base: 50 for any developer with repos
-- Has bio (>20 chars): +10
-- Has website/blog: +5
-- Has Twitter/social: +3
-- Public repos > 5: +8
-- Public repos > 15: +5 more
-- Total stars > 10: +5
-- Total stars > 100: +8
-- Recent commits (>10 events): +8
-- Recent commits (>30): +5 more
-- Multiple languages (>2): +5
-- Has profile README repo: +5
-- No bio: -10
-- Zero stars AND <5 repos: -8
-- No recent activity (<5 events): -10
-
-Profile:
-Username: ${user.login}
-Name: ${user.name || 'Not set'}
-Bio: ${user.bio || 'None'}
-Location: ${user.location || 'Not set'}
-Website: ${user.blog || 'None'}
-Twitter: ${user.twitter_username || 'None'}
-Company: ${user.company || 'None'}
-Followers: ${user.followers} | Following: ${user.following}
-Public repos: ${user.public_repos} | Gists: ${user.public_gists}
-Created: ${user.created_at?.split('T')[0]}
-Total stars: ${totalStars} | Forks: ${totalForks}
-Top languages: ${topLangs.join(', ')}
-Recent push events: ${commitEvents} | PR events: ${prEvents}
-Sample repos: ${Array.isArray(repos) ? repos.slice(0,8).map(r=>`${r.name}(★${r.stargazers_count},${r.language||'?'})`).join(', ') : 'none'}`
+    const prompt = buildProfilePrompt({ user, totalStars, totalForks, topLangs, commitEvents, prEvents, repos })
 
     const text = await callGroq([{ role: 'user', content: prompt }])
     res.json({ text, user, repos: Array.isArray(repos) ? repos.slice(0,10) : [], signals: { totalStars, totalForks, topLangs, commitEvents, prEvents } })
@@ -404,55 +367,7 @@ app.post('/api/analyze-linkedin', async (req, res) => {
       return res.status(400).json({ error: 'Profile content too short' })
     }
 
-    const prompt = `You are an expert LinkedIn profile coach and ATS specialist. Be fair — a decent profile with work history and skills should score 55-75.
-
-Return ONLY valid JSON (no markdown, no backticks):
-{
-  "score": number (0-100),
-  "grade": "A+"|"A"|"B+"|"B"|"C+"|"C"|"D",
-  "atsScore": number (0-100),
-  "headline": "2-sentence honest assessment",
-  "strengths": ["s1","s2","s3"],
-  "gaps": ["g1","g2","g3"],
-  "tags": ["tag1","tag2","tag3"],
-  "radarData": [
-    {"label":"Completeness","value":number},
-    {"label":"ATS Score","value":number},
-    {"label":"Keywords","value":number},
-    {"label":"Impact","value":number},
-    {"label":"Storytelling","value":number}
-  ],
-  "sections": [
-    {"name":"Headline & Summary","score":number,"feedback":"specific feedback"},
-    {"name":"Experience","score":number,"feedback":"specific feedback"},
-    {"name":"Skills & Endorsements","score":number,"feedback":"specific feedback"},
-    {"name":"Education & Certs","score":number,"feedback":"specific feedback"}
-  ],
-  "improvements": [
-    {"title":"specific action","why":"why it matters","priority":"high|medium|low"}
-  ],
-  "keywordsFound": ["kw1","kw2","kw3","kw4","kw5"],
-  "keywordsMissing": ["kw1","kw2","kw3","kw4"],
-  "estimatedRecruiterScore": number,
-  "profileCompleteness": number
-}
-
-SCORING:
-- Base: 55
-- Has quantified achievements: +12
-- Rich skills section: +8
-- Good headline with role keywords: +7
-- Strong summary with impact: +8
-- Has certifications: +5
-- Has projects/portfolio: +5
-- Missing quantification: -10
-- Vague descriptions: -8
-- Weak/generic headline: -10
-- Missing skills section: -12
-
-Target role: ${targetRole || 'General professional'}
-Profile text:
-${profileText.slice(0, 4000)}`
+    const prompt = buildLinkedinPrompt({ targetRole, profileText })
 
     const text = await callGroq([{ role: 'user', content: prompt }])
     res.json({ text })
@@ -469,60 +384,7 @@ app.post('/api/analyze-resume', async (req, res) => {
       return res.status(400).json({ error: 'Resume content too short' })
     }
 
-    const prompt = `You are a senior technical recruiter and resume expert. Be fair — a student with 3 solid ML projects and good formatting should score 70-85.
-
-Return ONLY valid JSON (no markdown, no backticks):
-{
-  "score": number (0-100),
-  "grade": "A+"|"A"|"B+"|"B"|"C+"|"C"|"D",
-  "atsScore": number (0-100),
-  "headline": "2-sentence honest assessment",
-  "strengths": ["s1","s2","s3"],
-  "gaps": ["g1","g2","g3"],
-  "tags": ["tag1","tag2","tag3"],
-  "radarData": [
-    {"label":"Format","value":number},
-    {"label":"ATS Score","value":number},
-    {"label":"Impact","value":number},
-    {"label":"Keywords","value":number},
-    {"label":"Clarity","value":number}
-  ],
-  "sections": [
-    {"name":"Contact & Header","score":number,"feedback":"specific feedback"},
-    {"name":"Work Experience","score":number,"feedback":"specific feedback"},
-    {"name":"Skills","score":number,"feedback":"specific feedback"},
-    {"name":"Education","score":number,"feedback":"specific feedback"},
-    {"name":"Projects/Extras","score":number,"feedback":"specific feedback"}
-  ],
-  "improvements": [
-    {"title":"specific action","why":"impact on hiring","where":"which section","priority":"high|medium|low"}
-  ],
-  "missingElements": ["e1","e2"],
-  "estimatedJobMatchScore": number,
-  "readabilityScore": number,
-  "keywordsFound": ["kw1","kw2","kw3","kw4","kw5"],
-  "keywordsMissing": ["kw1","kw2","kw3"]
-}
-
-SCORING (calibrated for student/early career):
-- Base: 60
-- Quantified achievements (%, $, metrics): +15
-- Live deployed projects: +10
-- Strong technical skills section: +8
-- Clean format signals: +5
-- Relevant certifications: +5
-- Contact info complete: +3
-- No work experience but has projects: neutral (not penalized for students)
-- No quantification at all: -10
-- Generic/vague descriptions: -8
-- Missing contact: -10
-- Very thin content: -15
-
-Target role: ${targetRole || 'Not specified'}
-Target company: ${targetCompany || 'Not specified'}
-
-Resume:
-${resumeText.slice(0, 5000)}`
+    const prompt = buildResumePrompt({ targetRole, targetCompany, resumeText })
 
     const text = await callGroq([{ role: 'user', content: prompt }])
     res.json({ text })
