@@ -5,6 +5,8 @@
   "scripts": {
     "dev": "concurrently \"vite\" \"node --env-file=.env server.js\"",
     "build": "vite build",
+    "test": "node --test",
+    "check:lines": "node scripts/check-file-lines.mjs",
     "start": "node server.js",
     "preview": "vite preview"
   },
